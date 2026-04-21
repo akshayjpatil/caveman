@@ -2,7 +2,7 @@
   <img src="https://em-content.zobj.net/source/apple/391/rock_1faa8.png" width="80" />
 </p>
 
-<h1 align="center">compress</h1>
+<h1 align="center">caveman-compress</h1>
 
 <p align="center">
   <strong>shrink memory file. save token every session.</strong>
@@ -35,10 +35,10 @@ Real results on real project files:
 |------|----------:|----------:|------:|
 | `claude-md-preferences.md` | 706 | 285 | **59.6%** |
 | `project-notes.md` | 1145 | 535 | **53.3%** |
-| `claude-md-project.md` | 1122 | 687 | **38.8%** |
+| `claude-md-project.md` | 1122 | 636 | **43.3%** |
 | `todo-list.md` | 627 | 388 | **38.1%** |
-| `mixed-with-code.md` | 888 | 574 | **35.4%** |
-| **Average** | **898** | **494** | **45%** |
+| `mixed-with-code.md` | 888 | 560 | **36.9%** |
+| **Average** | **898** | **481** | **46%** |
 
 All validations passed ✅ — headings, code blocks, URLs, file paths preserved exactly.
 
@@ -65,16 +65,18 @@ All validations passed ✅ — headings, code blocks, URLs, file paths preserved
 
 **Same instructions. 60% fewer tokens. Every. Single. Session.**
 
+## Security
+
+`caveman-compress` is flagged as Snyk High Risk due to subprocess and file I/O patterns detected by static analysis. This is a false positive — see [SECURITY.md](./SECURITY.md) for a full explanation of what the skill does and does not do.
+
 ## Install
 
-```bash
-cp -r <path-to-skill> ~/.claude/skills/compress
-```
+Compress is built in with the `caveman` plugin. Install `caveman` once, then use `/caveman:compress`.
 
-Or if you have the caveman repo:
+If you need local files, the compress skill lives at:
 
 ```bash
-cp -r skills/compress ~/.claude/skills/compress
+caveman-compress/
 ```
 
 **Requires:** Python 3.10+
@@ -142,15 +144,15 @@ Caveman compress natural language. It never touch:
 
 `CLAUDE.md` loads on **every session start**. A 1000-token project memory file costs tokens every single time you open a project. Over 100 sessions that's 100,000 tokens of overhead — just for context you already wrote.
 
-Caveman cut that by ~45% on average. Same instructions. Same accuracy. Less waste.
+Caveman cut that by ~46% on average. Same instructions. Same accuracy. Less waste.
 
 ```
-┌──────────────────────────────────────────┐
-│  TOKEN SAVINGS PER FILE    ████████  45% │
-│  SESSIONS THAT BENEFIT     ████████ 100% │
-│  INFORMATION PRESERVED     ████████ 100% │
-│  SETUP TIME                █         1x  │
-└──────────────────────────────────────────┘
+┌────────────────────────────────────────────┐
+│  TOKEN SAVINGS PER FILE    █████       46% │
+│  SESSIONS THAT BENEFIT     ██████████ 100% │
+│  INFORMATION PRESERVED     ██████████ 100% │
+│  SETUP TIME                █            1x │
+└────────────────────────────────────────────┘
 ```
 
 ## Part of Caveman
@@ -158,4 +160,4 @@ Caveman cut that by ~45% on average. Same instructions. Same accuracy. Less wast
 This skill is part of the [caveman](https://github.com/JuliusBrussee/caveman) toolkit — making Claude use fewer tokens without losing accuracy.
 
 - **caveman** — make Claude *speak* like caveman (cuts response tokens ~65%)
-- **compress** — make Claude *read* less (cuts context tokens ~45%)
+- **caveman-compress** — make Claude *read* less (cuts context tokens ~46%)

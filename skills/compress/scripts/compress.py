@@ -1,15 +1,67 @@
 #!/usr/bin/env python3
 """
-Caveman Memory Orchestrator
+Caveman Memory Compression Orchestrator
 
 Usage:
-    python memory/compress.py <filepath>
+    python scripts/compress.py <filepath>
 """
 
+import os
+import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import List
+
+OUTER_FENCE_REGEX = re.compile(
+    r"\A\s*(`{3,}|~{3,})[^\n]*\n(.*)\n\1\s*\Z", re.DOTALL
+)
+
+# Filenames and paths that almost certainly hold secrets or PII. Compressing
+# them ships raw bytes to the Anthropic API — a third-party data boundary that
+# developers on sensitive codebases cannot cross. detect.py already skips .env
+# by extension, but credentials.md / secrets.txt / ~/.aws/credentials would
+# slip through the natural-language filter. This is a hard refuse before read.
+SENSITIVE_BASENAME_REGEX = re.compile(
+    r"(?ix)^("
+    r"\.env(\..+)?"
+    r"|\.netrc"
+    r"|credentials(\..+)?"
+    r"|secrets?(\..+)?"
+    r"|passwords?(\..+)?"
+    r"|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?"
+    r"|authorized_keys"
+    r"|known_hosts"
+    r"|.*\.(pem|key|p12|pfx|crt|cer|jks|keystore|asc|gpg)"
+    r")$"
+)
+
+SENSITIVE_PATH_COMPONENTS = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker"})
+
+SENSITIVE_NAME_TOKENS = (
+    "secret", "credential", "password", "passwd",
+    "apikey", "accesskey", "token", "privatekey",
+)
+
+
+def is_sensitive_path(filepath: Path) -> bool:
+    """Heuristic denylist for files that must never be shipped to a third-party API."""
+    name = filepath.name
+    if SENSITIVE_BASENAME_REGEX.match(name):
+        return True
+    lowered_parts = {p.lower() for p in filepath.parts}
+    if lowered_parts & SENSITIVE_PATH_COMPONENTS:
+        return True
+    # Normalize separators so "api-key" and "api_key" both match "apikey".
+    lower = re.sub(r"[_\-\s.]", "", name.lower())
+    return any(tok in lower for tok in SENSITIVE_NAME_TOKENS)
+
+
+def strip_llm_wrapper(text: str) -> str:
+    """Strip outer ```markdown ... ``` fence when it wraps the entire output."""
+    m = OUTER_FENCE_REGEX.match(text)
+    if m:
+        return m.group(2)
+    return text
 
 from .detect import should_compress
 from .validate import validate
@@ -21,6 +73,21 @@ MAX_RETRIES = 2
 
 
 def call_claude(prompt: str) -> str:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        try:
+            import anthropic
+
+            client = anthropic.Anthropic(api_key=api_key)
+            msg = client.messages.create(
+                model=os.environ.get("CAVEMAN_MODEL", "claude-sonnet-4-5"),
+                max_tokens=8192,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return strip_llm_wrapper(msg.content[0].text.strip())
+        except ImportError:
+            pass  # anthropic not installed, fall back to CLI
+    # Fallback: use claude CLI (handles desktop auth)
     try:
         result = subprocess.run(
             ["claude", "--print"],
@@ -29,7 +96,7 @@ def call_claude(prompt: str) -> str:
             capture_output=True,
             check=True,
         )
-        return result.stdout.strip()
+        return strip_llm_wrapper(result.stdout.strip())
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Claude call failed:\n{e.stderr}")
 
@@ -44,6 +111,7 @@ STRICT RULES:
 - Preserve ALL URLs exactly
 - Preserve ALL headings exactly
 - Preserve file paths and commands
+- Return ONLY the compressed markdown body — do NOT wrap the entire output in a ```markdown fence or any other fence. Inner code blocks from the original stay as-is; do not add a new outer fence around the whole file.
 
 Only compress natural language.
 
@@ -54,7 +122,7 @@ TEXT:
 
 def build_fix_prompt(original: str, compressed: str, errors: List[str]) -> str:
     errors_str = "\n".join(f"- {e}" for e in errors)
-    return f"""You are fixing a compressed markdown file. Specific validation errors were found.
+    return f"""You are fixing a caveman-compressed markdown file. Specific validation errors were found.
 
 CRITICAL RULES:
 - DO NOT recompress or rephrase the file
@@ -85,17 +153,44 @@ Return ONLY the fixed compressed file. No explanation.
 
 
 def compress_file(filepath: Path) -> bool:
-    print(f"📄 Processing: {filepath}")
+    # Resolve and validate path
+    filepath = filepath.resolve()
+    MAX_FILE_SIZE = 500_000  # 500KB
+    if not filepath.exists():
+        raise FileNotFoundError(f"File not found: {filepath}")
+    if filepath.stat().st_size > MAX_FILE_SIZE:
+        raise ValueError(f"File too large to compress safely (max 500KB): {filepath}")
+
+    # Refuse files that look like they contain secrets or PII. Compressing ships
+    # the raw bytes to the Anthropic API — a third-party boundary — so we fail
+    # loudly rather than silently exfiltrate credentials or keys. Override is
+    # intentional: the user must rename the file if the heuristic is wrong.
+    if is_sensitive_path(filepath):
+        raise ValueError(
+            f"Refusing to compress {filepath}: filename looks sensitive "
+            "(credentials, keys, secrets, or known private paths). "
+            "Compression sends file contents to the Anthropic API. "
+            "Rename the file if this is a false positive."
+        )
+
+    print(f"Processing: {filepath}")
 
     if not should_compress(filepath):
-        print("⚠️ Skipping (not natural language)")
+        print("Skipping (not natural language)")
         return False
 
     original_text = filepath.read_text(errors="ignore")
     backup_path = filepath.with_name(filepath.stem + ".original.md")
 
+    # Check if backup already exists to prevent accidental overwriting
+    if backup_path.exists():
+        print(f"⚠️ Backup file already exists: {backup_path}")
+        print("The original backup may contain important content.")
+        print("Aborting to prevent data loss. Please remove or rename the backup file if you want to proceed.")
+        return False
+
     # Step 1: Compress
-    print("🧠 Compressing with Claude...")
+    print("Compressing with Claude...")
     compressed = call_claude(build_compress_prompt(original_text))
 
     # Save original as backup, write compressed to original path
@@ -104,12 +199,12 @@ def compress_file(filepath: Path) -> bool:
 
     # Step 2: Validate + Retry
     for attempt in range(MAX_RETRIES):
-        print(f"\n🔍 Validation attempt {attempt + 1}")
+        print(f"\nValidation attempt {attempt + 1}")
 
         result = validate(backup_path, filepath)
 
         if result.is_valid:
-            print("✅ Validation passed")
+            print("Validation passed")
             break
 
         print("❌ Validation failed:")
@@ -123,36 +218,10 @@ def compress_file(filepath: Path) -> bool:
             print("❌ Failed after retries — original restored")
             return False
 
-        print("🛠 Fixing with Claude...")
+        print("Fixing with Claude...")
         compressed = call_claude(
             build_fix_prompt(original_text, compressed, result.errors)
         )
         filepath.write_text(compressed)
 
     return True
-
-
-# ---------- Main ----------
-
-
-def main():
-    if len(sys.argv) != 2:
-        print("Usage: python memory/compress.py <filepath>")
-        sys.exit(1)
-
-    filepath = Path(sys.argv[1])
-
-    if not filepath.exists():
-        print(f"❌ File not found: {filepath}")
-        sys.exit(1)
-
-    success = compress_file(filepath)
-
-    if success:
-        sys.exit(0)
-    else:
-        sys.exit(2)
-
-
-if __name__ == "__main__":
-    main()
